@@ -405,7 +405,7 @@ def load_editor(level_idx):
     active_rung       = 0
     variable_registry = {}
     var_counter[0]    = 0
-    sim_running       = True
+    sim_running       = False
     input_states      = {}
     output_states     = {}
     timer_state       = {}
@@ -535,15 +535,93 @@ def _build_editor_ui():
                   font=("Courier",9,"bold"),padx=12,pady=4,
                   cursor="hand2").pack(pady=16)
 
+    # Track UI elements that should be disabled during run
+    _editable_widgets = []  # List of widgets to enable/disable
+
     # Now create the buttons
     _make_btn(left_f, "+ New Rung",   _add_rung)
     branch_btn = _make_btn(left_f, "⊥ Add Branch", None)
     _make_btn(left_f, "⌫  Undo",      _undo_last)
     _make_btn(left_f, "✕  Clear",     _clear_all)
 
+    # Run/Stop button (right side)
+    def _toggle_run():
+        global sim_running
+        sim_running = not sim_running
+        if sim_running:
+            run_btn.config(text="■  STOP", fg="#ff4444")
+            # Disable editing
+            _set_editable(False)
+            # Clear previous states and start fresh
+            output_states.clear()
+            timer_state.clear()
+            _evaluate()
+        else:
+            run_btn.config(text="▶  RUN", fg="#00ff88")
+            # Re-enable editing
+            _set_editable(True)
+            # Clear simulation state
+            output_states.clear()
+            timer_state.clear()
+            _redraw()
+            _update_input_bar()
+            # Reset success label
+            success_lbl.config(text="")
+
+    run_btn = tk.Button(right_f, text="▶  RUN", command=_toggle_run,
+                        bg=BTN_BG, fg="#00ff88",
+                        activebackground=BTN_HOV, activeforeground=TEXT_CLR,
+                        relief="flat", font=("Courier", 9, "bold"),
+                        padx=10, pady=4, cursor="hand2",
+                        bd=1, highlightbackground="#30363d")
+    run_btn.pack(side="right", padx=3)
+
     # Hint button (levels only)
     if current_level is not None:
         _make_btn(right_f, "?  Hint", _show_hint)
+
+    def _set_editable(editable):
+        """Enable or disable all editing widgets during run/stop."""
+        state = "normal" if editable else "disabled"
+        cursor_val = "hand2" if editable else "arrow"
+        
+        # Disable palette
+        for child in palette.winfo_children():
+            try:
+                child.config(state=state, cursor=cursor_val)
+            except tk.TclError:
+                pass
+        
+        # Disable toolbar editing buttons (but not Run or Hint)
+        for btn in left_f.winfo_children():
+            if isinstance(btn, tk.Button):
+                btn.config(state=state)
+        
+        # Disable variable panel interactions
+        for child in var_panel.winfo_children():
+            try:
+                child.config(state=state, cursor=cursor_val)
+            except tk.TclError:
+                pass
+        
+        # Disable Add Branch button
+        branch_btn.config(state=state)
+        
+        # Disable input buttons when running (they're toggles, keep them interactive)
+        # Actually, inputs should remain toggleable during run
+        
+        # Disable canvas drag operations when running
+        if not editable:
+            canvas.unbind("<ButtonPress-1>")
+            canvas.unbind("<B1-Motion>")
+            canvas.unbind("<ButtonRelease-1>")
+            canvas.config(cursor="arrow")
+        else:
+            canvas.bind("<ButtonPress-1>", _canvas_press)
+            canvas.bind("<B1-Motion>", _canvas_motion)
+            canvas.bind("<ButtonRelease-1>", _canvas_release)
+            canvas.bind("<Motion>", lambda e: canvas.config(
+                cursor="hand2" if _locate(canvas.canvasx(e.x), canvas.canvasy(e.y)) else "arrow"))
 
     # ── Level objective panel ──────────────────────────────────
     if current_level is not None:
@@ -779,6 +857,9 @@ def _build_editor_ui():
     def _canvas_release(event):
         if _press["ri"] is None: return
         if not _press["dragging"]:
+            if sim_running: 
+                _press.update(ri=None,ci=None,bi=None,dragging=False)
+                return  # Block contact menu during run
             ri,ci,bi=_press["ri"],_press["ci"],_press["bi"]
             _select_col(ri,ci)
             _contact_menu(event,ri,ci,bi)
@@ -802,6 +883,7 @@ def _build_editor_ui():
     window.bind("<Escape>", lambda e: (_select_col.__func__ if hasattr(_select_col,"__func__") else None) or _deselect())
 
     def _deselect(e=None):
+        if sim_running: return  # Don't allow deselection during run
         global selected_col
         selected_col=None; _redraw()
     window.bind("<Escape>", _deselect)
@@ -893,6 +975,9 @@ def _build_editor_ui():
     # ── Success check ──────────────────────────────────────────
     def _check_success():
         if current_level is None: return
+        if not sim_running: 
+            success_lbl.config(text="")
+            return
         lvl=LEVELS[current_level]
         tgt=lvl["target_outputs"]
         ok=all(bool(output_states.get(v,False))==bool(want) for v,want in tgt.items())
@@ -919,8 +1004,12 @@ def _build_editor_ui():
         finally:menu.grab_release()
 
     # ── Drawing ────────────────────────────────────────────────
-    def wclr(p): return "#00ff88" if (sim_running and p) else "#2a2a2a"
-    def sclr(p): return "#00ff88" if (sim_running and p) else "#555555"
+    def wclr(p): 
+        if not sim_running: return "#2a2a2a"  # Grey when stopped
+        return "#00ff88" if p else "#2a2a2a"
+    def sclr(p): 
+        if not sim_running: return "#444444"  # Grey when stopped
+        return "#00ff88" if p else "#555555"
 
     def _draw_sym(c,entry,sx,sy,sc,wc):
         global SYM_CLR,WIRE_CLR
@@ -937,6 +1026,8 @@ def _build_editor_ui():
                 return
         except tk.TclError:
             return
+            
+            
         canvas.delete("all")
         cw=canvas.winfo_width() or 900
         total_h=80+sum(rung_height(r) for r in rungs)
@@ -944,8 +1035,11 @@ def _build_editor_ui():
         rl,rr=RUNG_PAD,cw-RUNG_PAD; y=40
         for i,rung in enumerate(rungs):
             rh=rung_height(rung); cy=y+rh//2; is_act=(i==active_rung)
+            
+            # Left rail always green, right rail grey when stopped
             canvas.create_line(rl,y,rl,y+rh,fill=RAIL_CLR,width=4)
-            canvas.create_line(rr,y,rr,y+rh,fill=RAIL_CLR,width=4)
+            right_color = RAIL_CLR if sim_running else "#2a2a2a"
+            canvas.create_line(rr,y,rr,y+rh,fill=right_color,width=4)
             canvas.create_text(rl-16,cy,text=str(i+1),
                                fill=RAIL_CLR if is_act else LABEL_CLR,
                                font=("Courier",8,"bold" if is_act else "normal"),
@@ -1002,7 +1096,10 @@ def _build_editor_ui():
                 return
         except tk.TclError:
             return
-        _evaluate() if sim_running else _redraw()
+        if sim_running:
+            _evaluate()
+        else:
+            _redraw()
         _update_var_panel()
         _update_input_bar()
 
