@@ -59,14 +59,13 @@ def draw_n_contact(c, cx, cy):
 
 def draw_coil(c, cx, cy):
     r = 18
-    c.create_line(cx-40, cy, cx-r, cy,     fill=SYM_CLR, width=2)
-    c.create_line(cx+r,  cy, cx+40, cy,    fill=SYM_CLR, width=2)
+    # Don't draw horizontal lines - let redraw handle wiring
     c.create_oval(cx-r, cy-r, cx+r, cy+r,  outline=SYM_CLR, width=2)
     c.create_text(cx, cy-r-8, text="OUT",  fill=LABEL_CLR, font=("Courier", 8))
 
 def draw_neg(c, cx, cy):
-    draw_coil(c, cx, cy)
     r = 18
+    c.create_oval(cx-r, cy-r, cx+r, cy+r,  outline=SYM_CLR, width=2)
     c.create_line(cx-r+5, cy+r-5, cx+r-5, cy-r+5, fill=SYM_CLR, width=2)
     c.create_text(cx, cy-r-8, text="NEG",  fill=LABEL_CLR, font=("Courier", 8))
 
@@ -141,7 +140,7 @@ rungs          = [[]]
 active_rung    = 0
 variable_registry = {}
 var_counter    = [0]
-sim_running    = True
+sim_running    = False
 input_states   = {}
 output_states  = {}
 timer_state = {}   # var_name -> {"running": bool, "start": float, "done": bool}
@@ -218,23 +217,44 @@ def clear_all():
     sim_running = True
     refresh()
 
+# Create a frame for left buttons
+left_btns = tk.Frame(toolbar, bg=BG)
+left_btns.pack(side="left")
+
+# Create a frame for right buttons
+right_btns = tk.Frame(toolbar, bg=BG)
+right_btns.pack(side="right")
+
 # Left group — editing actions
-make_btn(toolbar, "+ New Rung",   add_rung)
-branch_btn = make_btn(toolbar, "⊥ Add Branch", None)
-tk.Frame(toolbar, bg="#30363d", width=1).pack(side="left", fill="y", padx=10, pady=4)
-make_btn(toolbar, "⌫  Undo",      undo_last)
-make_btn(toolbar, "✕  Clear All", clear_all)
+make_btn(left_btns, "+ New Rung",   add_rung)
+branch_btn = make_btn(left_btns, "⊥ Add Branch", None)
+make_btn(left_btns, "⌫  Undo",      undo_last)
+make_btn(left_btns, "✕  Clear All", clear_all)
 
-def add_branch_to_selected():
-    if selected_col is not None:
-        _add_branch(selected_col[0], selected_col[1])
-        redraw()
+# Run/Stop button on the right
+def toggle_run():
+    global sim_running
+    sim_running = not sim_running
+    if sim_running:
+        run_btn.config(text="■  STOP", fg="#ff4444")
+        evaluate_ladder()
     else:
-        # Flash the button to indicate nothing is selected
-        branch_btn.config(bg="#ff4444", fg="white")
-        window.after(400, lambda: branch_btn.config(bg=BTN_BG, fg=TEXT_CLR))
+        run_btn.config(text="▶  RUN", fg="#00ff88")
+        # Clear all output states when stopping
+        output_states.clear()
+        timer_state.clear()
+        input_states.clear()  # Also clear input states on stop
+    redraw()
+    update_input_bar()
 
-branch_btn.config(command=add_branch_to_selected)
+run_btn = tk.Button(right_btns, text="▶  RUN", command=toggle_run,
+                    bg=BTN_BG, fg="#00ff88",
+                    activebackground=BTN_HOV, activeforeground=TEXT_CLR,
+                    relief="flat", font=("Courier", 9, "bold"),
+                    padx=10, pady=4, cursor="hand2",
+                    bd=1, highlightbackground="#30363d")
+run_btn.pack(side="right", padx=3)
+
 
 # ── Tooltip ───────────────────────────────────────────────────
 
@@ -242,16 +262,21 @@ tooltip = tk.Toplevel(window)
 tooltip.withdraw()
 tooltip.overrideredirect(True)
 tooltip.configure(bg="#21262d")
+# Make sure tooltip doesn't steal focus
+tooltip.attributes('-topmost', True)
+tooltip.withdraw()  # Ensure it's hidden
 _tt_label = tk.Label(tooltip, bg="#21262d", fg=TEXT_CLR,
                      font=("Courier", 9), justify="left",
                      padx=10, pady=8, wraplength=180)
 _tt_label.pack()
 
 def show_tooltip(event, name):
-    _tt_label.config(text=TOOLTIP_TEXT[name])
-    tooltip.geometry(f"+{event.widget.winfo_rootx()+event.widget.winfo_width()+8}"
-                     f"+{event.widget.winfo_rooty()}")
-    tooltip.deiconify(); tooltip.lift()
+    _tt_label.config(text=TOOLTIP_TEXT.get(name, name))
+    x = event.widget.winfo_rootx() + event.widget.winfo_width() + 8
+    y = event.widget.winfo_rooty()
+    tooltip.geometry(f"+{x}+{y}")
+    tooltip.deiconify()
+    tooltip.lift()
 
 def hide_tooltip(_event):
     tooltip.withdraw()
@@ -546,14 +571,14 @@ def _locate_symbol(mx, my):
             for j, col in enumerate(rung):
                 sx = start + j * slot_w + slot_w // 2
 
-                # Check horizontal bounds
+                # Check horizontal bounds - must be within column
                 if abs(mx - sx) > slot_w // 2:
                     continue
 
                 bys_ = branch_ys(cy, len(col["branches"]))
 
                 for b, by in enumerate(bys_):
-                    # Check vertical bounds
+                    # Check vertical bounds with a tighter hit area
                     if abs(my - by) <= BRANCH_H // 2:
                         return i, j, b
 
@@ -564,29 +589,43 @@ def _locate_symbol(mx, my):
 # ── Canvas Event Handlers ───────────────────────────
 
 def _force_unfocus(event):
+    # Don't process events during startup
+    if not window.winfo_viewable():
+        return
     current = window.focus_get()
-  
     if isinstance(current, tk.Entry) and event.widget is not current:
-
-        current.event_generate("<FocusOut>")
+        try:
+            current.event_generate("<FocusOut>")
+        except tk.TclError:
+            pass  # Widget might have been destroyed
 
 
 def _canvas_press(event):
     mx = canvas.canvasx(event.x)
     my = canvas.canvasy(event.y)
 
+    # First check if we're clicking on a symbol
     res = _locate_symbol(mx, my)
-    if not res:
+    if res:
+        ri, ci, bi = res
+        _press.update(
+            x=event.x_root,
+            y=event.y_root,
+            ri=ri, ci=ci, bi=bi,
+            dragging=False
+        )
         return
-
-    ri, ci, bi = res
-
-    _press.update(
-        x=event.x_root,
-        y=event.y_root,
-        ri=ri, ci=ci, bi=bi,
-        dragging=False
-    )
+    
+    # If not on a symbol, check if we're clicking on a rung (for rung selection)
+    cw = canvas.winfo_width()
+    y = 40
+    for i, rung in enumerate(rungs):
+        rh = rung_height(rung)
+        if y <= my <= y + rh and RUNG_PAD <= mx <= cw - RUNG_PAD:
+            # Clicked on a rung - select it
+            select_rung(i)
+            return
+        y += rh
 
 def _canvas_motion(event):
     if _press["ri"] is None:
@@ -716,12 +755,14 @@ def _draw_entry(c, entry, sx, sy, s_col, w_col):
     WIRE_CLR = RAIL_CLR
 
 def wclr(powered):
-    return "#00ff88" if (sim_running and powered) else \
-           "#2a2a2a" if sim_running else WIRE_CLR
+    if not sim_running:
+        return "#2a2a2a"  # Dark grey when stopped
+    return "#00ff88" if powered else "#2a2a2a"
 
 def sclr(powered):
-    return "#00ff88" if (sim_running and powered) else \
-           "#555555" if sim_running else SYM_CLR
+    if not sim_running:
+        return "#444444"  # Medium grey when stopped
+    return "#00ff88" if powered else "#555555"
 
 def _select_col(ri, ci):
     global selected_col, active_rung
@@ -748,7 +789,9 @@ def redraw(*_):
 
         # Rails
         canvas.create_line(rail_l, y, rail_l, y+rh, fill=RAIL_CLR, width=4)
-        canvas.create_line(rail_r, y, rail_r, y+rh, fill=RAIL_CLR, width=4)
+        # Right rail goes grey when stopped
+        right_rail_color = RAIL_CLR if sim_running else "#2a2a2a"
+        canvas.create_line(rail_r, y, rail_r, y+rh, fill=right_rail_color, width=4)
 
         # Rung number (clickable to select)
         canvas.create_text(rail_l-16, cy, text=str(i+1),
@@ -757,8 +800,9 @@ def redraw(*_):
                            anchor="e")
 
         if not rung:
+            empty_color = WIRE_CLR if sim_running else "#2a2a2a"
             canvas.create_line(rail_l, cy, rail_r, cy,
-                               fill=WIRE_CLR, width=2, dash=(6,4))
+                               fill=empty_color, width=2, dash=(6,4))
             y += rh; continue
     
 
@@ -806,7 +850,7 @@ def redraw(*_):
                 lit = entry_lit[j][b] if entry_lit else False
                 _draw_entry(canvas, entry, sx, by, sclr(lit), sclr(col_power[j]))
                 lc  = "#00ff88" if (sim_running and lit) else \
-                      "#555555" if sim_running else RAIL_CLR
+                      "#555555" if sim_running else "#444444"
                 canvas.create_text(sx, by-(48 if n_b>1 else 36),
                                    text=entry.get("variable") or "?",
                                    fill=lc, font=("Courier", 7 if n_b>1 else 8, "bold"))
@@ -837,13 +881,41 @@ def redraw(*_):
 
         y += rh
 
+def add_branch_to_selected():
+    if selected_col is not None:
+        ri, ci = selected_col
+        _add_branch(ri, ci)
+        redraw()
+    else:
+        # Flash the button to indicate nothing is selected
+        branch_btn.config(bg="#ff4444", fg="white")
+        window.after(400, lambda: branch_btn.config(bg=BTN_BG, fg=TEXT_CLR))
 
 def _add_branch(ri, ci):
     branches = rungs[ri][ci]["branches"]
     bi = len(branches)
-    branches.append(new_entry("Contact"))
+    # Get the first branch's entry
+    first_entry = branches[0]
+    
+    # Create a new entry based on the first branch's type
+    if first_entry["type"] == "Contact":
+        new_entry_data = {
+            "type": "Contact",
+            "contact_type": first_entry.get("contact_type", "NO"),
+            "variable": None  # New branch gets no variable assigned
+        }
+    else:
+        # For other symbol types, copy the type but not the variable
+        new_entry_data = {
+            "type": first_entry["type"],
+            "variable": None
+        }
+    
+    branches.append(new_entry_data)
     branch_undo_stack.append((ri, ci, bi))
     redraw()
+
+branch_btn.config(command=add_branch_to_selected)
 
 # ── Contact type menu (left-click on contact) ─────────────────
 
@@ -977,6 +1049,7 @@ def update_variable_panel():
                                relief="flat", font=("Courier", 8),
                                highlightbackground="#30363d", highlightthickness=1)
             entry_w.pack(side="left", padx=(2,0))
+            
             def _save_int(event=None, v=var, sv=val_var, entry_widget=entry_w):
                 text = sv.get().strip()
 
@@ -1008,7 +1081,6 @@ def update_variable_panel():
 
                     entry_widget.focus_set()
 
-            window.bind_all("<Button-1>", _force_unfocus)
 
 # ── Init ──────────────────────────────────────────────────────
 
@@ -1039,5 +1111,12 @@ canvas.bind("<Configure>", redraw)
 canvas.bind("<Button-1>", _force_unfocus, add="+")
 palette.bind("<Button-1>", _force_unfocus, add="+")
 var_panel.bind("<Button-1>", _force_unfocus, add="+")
+
+# Give focus to the main window and bring it to front
+window.lift()
+window.focus_force()
+window.attributes('-topmost', True)
+window.after(100, lambda: window.attributes('-topmost', False))
+
 redraw()
 window.mainloop()
