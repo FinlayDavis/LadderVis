@@ -440,8 +440,27 @@ def _build_editor_ui():
     right_f = tk.Frame(toolbar, bg=BG)
     right_f.pack(side="right")
 
+    # Store timer ID so we can cancel it
+    _tick_id = [None]
+    
+    def _tick():
+        if current_screen == "editor" and sim_running:
+            try:
+                canvas.winfo_exists()
+                _evaluate()
+            except tk.TclError:
+                return
+        if current_screen == "editor":
+            _tick_id[0] = window.after(100, _tick)
+    
+    # Start the tick
+    _tick_id[0] = window.after(100, _tick)
+
     # Back button
     def _go_back():
+        # Cancel the timer
+        if _tick_id[0]:
+            window.after_cancel(_tick_id[0])
         if current_level is None:
             show_start_screen()
         else:
@@ -858,6 +877,11 @@ def _build_editor_ui():
 
     def _evaluate():
         global output_states
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
         output_states={}
         for rung in rungs:
             p=True
@@ -908,6 +932,11 @@ def _build_editor_ui():
         SYM_CLR=RAIL_CLR; WIRE_CLR=RAIL_CLR
 
     def _redraw(*_):
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
         canvas.delete("all")
         cw=canvas.winfo_width() or 900
         total_h=80+sum(rung_height(r) for r in rungs)
@@ -968,6 +997,11 @@ def _build_editor_ui():
             y+=rh
 
     def _refresh():
+        try:
+            if not canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
         _evaluate() if sim_running else _redraw()
         _update_var_panel()
         _update_input_bar()
@@ -1111,13 +1145,6 @@ def _build_editor_ui():
         _l.bind("<Enter>",          lambda e,n=_sym:show_tip(e,n))
         _l.bind("<Leave>",          hide_tip)
 
-    # ── Timer tick ────────────────────────────────────────────
-    def _tick():
-        if current_screen=="editor" and sim_running:
-            _evaluate()
-        window.after(100,_tick)
-
-    _tick()
     canvas.bind("<Configure>",_redraw)
     _refresh()
 
